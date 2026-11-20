@@ -187,16 +187,16 @@ repos:
 - **Stable identities.** Finding IDs are derived from the rule and the secret's fingerprint, not the line number, so baselines survive refactors. A secret found in both the worktree and history is reported once, tagged `git-history`.
 - **Tested.** 36 stdlib `unittest` cases cover every rule and MCP check, false positives, redaction, SARIF shape, baselines, exit codes, staged mode, proposal tampering and ledger tampering. CI runs them on Python 3.10 through 3.13.
 
-## Part of an end-to-end agent security lifecycle
+## Part of an end-to-end governed-agent lifecycle
 
 | Stage | Repo | Question it answers |
 |---|---|---|
 | **Before commit / build** | **DeadBolt** | Did a credential or an over-broad agent grant leak into code, config, history or an image, and how bad is it? |
-| Runtime identity | [agent-foundry](https://github.com/TAM-DS/agent-foundry) | What identity and authority does each agent hold while it runs? |
-| Runtime guardrails | [guardrails-mcp](https://github.com/TAM-DS/guardrails-mcp) | Is this tool call allowed right now? |
-| After a breach | [penumbra](https://github.com/TAM-DS/penumbra) | What did an insider or a compromised agent actually do? |
+| Before a prompt ships | [guardrails-mcp](https://github.com/TAM-DS/guardrails-mcp) | Did the prompt change actually make things better? (baseline vs. candidate on labeled cases, human release decision) |
+| Before and at deployment | [agent-foundry](https://github.com/TAM-DS/agent-foundry) | Was this agent validated, evaluated and explicitly approved, and what bounded runtime grant does it get? |
+| Runtime detection & response | [penumbra](https://github.com/TAM-DS/penumbra) | Is an insider, a spy or a hijacked agent active right now, and what containment should a human approve? |
 
-They share one principle: **no standing authority without a human in the loop.**
+They share one principle, the same one Agent Foundry states as *capability is not authority*: **the model proposes, the system decides what is authorized, and a human decides what happens.**
 
 ## Roadmap
 
