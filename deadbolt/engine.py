@@ -14,6 +14,7 @@ from . import agentic
 from .blast import enrich
 from .models import Finding, Severity
 from .scanner import scan_text
+from .redaction import sanitize, sanitize_text
 from .sources import Blob, iter_files, iter_history, iter_staged, read_blob
 
 
@@ -37,6 +38,7 @@ class ScanResult:
     duration_s: float
     suppressed: int = 0
     sources: list[str] = field(default_factory=list)
+    network_calls: int = 0
 
 
 def scan_blob(blob: Blob) -> list[Finding]:
@@ -108,7 +110,10 @@ def load_baseline(path: Path | None) -> set[str]:
     if not path or not path.is_file():
         return set()
     data = json.loads(path.read_text())
-    return {e["id"] if isinstance(e, dict) else e for e in data.get("findings", data if isinstance(data, list) else [])}
+    entries = data.get("findings", []) if isinstance(data, dict) else data
+    if not isinstance(entries, list):
+        raise ValueError("Baseline must contain a findings list")
+    return {e["id"] if isinstance(e, dict) else e for e in entries}
 
 
 def run(target: Path, opts: ScanOptions) -> ScanResult:
@@ -120,7 +125,7 @@ def run(target: Path, opts: ScanOptions) -> ScanResult:
 
     if opts.staged:
         sources.append("staged")
-        for blob in iter_staged(target):
+        for blob in iter_staged(target, opts.exclude):
             files += 1
             nbytes += len(blob.text)
             findings.extend(scan_blob(blob))
@@ -145,7 +150,8 @@ def run(target: Path, opts: ScanOptions) -> ScanResult:
             nbytes += len(blob.text)
             findings.extend(scan_blob(blob))
 
-    findings = enrich(dedupe(findings))
+    secrets = tuple({getattr(f, "_raw") for f in findings if hasattr(f, "_raw")})
+    findings = [sanitize(f, secrets) for f in enrich(dedupe(findings))]
     for f in findings:
         if hasattr(f, "_raw"):
             del f._raw  # type: ignore[attr-defined]  # raw values never leave the engine
@@ -155,7 +161,7 @@ def run(target: Path, opts: ScanOptions) -> ScanResult:
     suppressed = len(findings) - len(kept)
     kept.sort(key=lambda f: (-f.severity, -(f.blast.score if f.blast else 0), f.location.path, f.location.line))
     return ScanResult(
-        root=str(target),
+        root=sanitize_text(str(target), secrets),
         findings=kept,
         files_scanned=files,
         bytes_scanned=nbytes,

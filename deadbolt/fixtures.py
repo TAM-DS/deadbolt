@@ -142,8 +142,8 @@ def _git_history(root: Path, t: dict[str, str]) -> bool:
 def generate(out: Path, seed: int = 4471, with_git: bool = True) -> Path:
     g = _Gen(seed)
     t = _tokens(g)
-    if out.exists():
-        shutil.rmtree(out)
+    # Exclusive creation prevents accidental replacement and concurrent generators.
+    out.mkdir(parents=True, exist_ok=False)
     files: dict[str, str] = {
         "README.md": textwrap.dedent("""\
             # edge-diagnostics (SYNTHETIC FIXTURE — every credential here is fake)

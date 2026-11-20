@@ -44,7 +44,7 @@ def render_text(result: ScanResult, out: TextIO = sys.stdout, color: bool | None
     w = out.write
     w(c(_BOLD, f"DeadBolt {__version__}") + c(_DIM, f"  ·  {result.root}  ·  sources: {', '.join(result.sources)}\n"))
     w(c(_DIM, f"{result.files_scanned} files · {result.bytes_scanned / 1e6:.2f} MB · "
-              f"{result.duration_s * 1000:.0f} ms · 0 network calls\n\n"))
+              f"{result.duration_s * 1000:.0f} ms · {result.network_calls} attempted network calls\n\n"))
     if not result.findings:
         w(c("\033[32m", "✔ No findings.\n"))
         return
@@ -55,7 +55,7 @@ def render_text(result: ScanResult, out: TextIO = sys.stdout, color: bool | None
         w(f"           {f.message}\n")
         if f.blast:
             b = f.blast
-            w(c(_DIM, f"           blast radius {b.score:>3}/100 · authority={b.authority.label}"
+            w(c(_DIM, f"           blast radius {b.score:>3}/100 · estimated authority={b.authority.label}"
                       + (f" · exposure={','.join(b.exposure)}" if b.exposure else "") + "\n"))
             for r in b.rationale[1:4]:
                 w(c(_DIM, f"             – {r}\n"))
@@ -80,7 +80,7 @@ def to_json(result: ScanResult) -> dict[str, Any]:
             "files_scanned": result.files_scanned,
             "bytes_scanned": result.bytes_scanned,
             "duration_ms": round(result.duration_s * 1000, 1),
-            "network_calls": 0,
+            "network_calls": result.network_calls,
             "suppressed": result.suppressed,
         },
         "summary": dict(Counter(f.severity.label for f in result.findings)),
@@ -98,7 +98,7 @@ def to_sarif(result: ScanResult) -> dict[str, Any]:
             "id": r.id,
             "name": r.title.replace(" ", ""),
             "shortDescription": {"text": r.title},
-            "fullDescription": {"text": f"{r.title}. Authority if leaked: {r.authority.label} — {r.scope}"},
+            "fullDescription": {"text": f"{r.title}. Estimated potential authority if leaked: {r.authority.label} — {r.scope}"},
             "help": {"text": "Revocation runbook:\n" + "\n".join(f"- {s}" for s in r.revoke)},
             "defaultConfiguration": {"level": r.severity.sarif_level},
             "properties": {"tags": ["security", "secret", r.provider], "security-severity": _SEC_SEV[r.severity]},
@@ -120,7 +120,7 @@ def to_sarif(result: ScanResult) -> dict[str, Any]:
             "ruleId": f.rule_id,
             "ruleIndex": index[f.rule_id],
             "level": f.severity.sarif_level,
-            "message": {"text": f.message + (f" | blast radius {f.blast.score}/100, authority={f.blast.authority.label}"
+            "message": {"text": f.message + (f" | blast radius {f.blast.score}/100, estimated authority={f.blast.authority.label}"
                                              if f.blast else "")},
             "locations": [{
                 "physicalLocation": {

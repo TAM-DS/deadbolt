@@ -52,8 +52,7 @@ def _b64json(part: str) -> dict[str, Any] | None:
 
 
 def decode_jwt_claims(token: str) -> dict[str, Any] | None:
-    """Decode (NOT verify) a JWT payload. Signature verification is irrelevant here:
-    we want to know what the token *claims* it can do if an attacker replays it."""
+    """Decode unverified claims for triage. Effective access remains unknown."""
     parts = token.split(".")
     if len(parts) != 3:
         return None
@@ -67,10 +66,10 @@ def _jwt_authority(claims: dict[str, Any]) -> tuple[Authority, list[str]]:
     scopes = " ".join(str(claims.get(k, "")) for k in ("scope", "scp", "permissions", "roles")).lower()
     if role in ("service_role", "admin", "superuser", "owner") or "admin" in scopes:
         auth = Authority.ADMIN
-        notes.append(f"claims grant elevated role ({role or 'admin scope'}) — bypasses row-level / tenant controls")
+        notes.append(f"unverified claims suggest elevated role ({role or 'admin scope'}); effective access unknown")
     elif any(w in scopes for w in ("write", "deploy", "delete", "publish")):
         auth = Authority.WRITE
-        notes.append("claims include write-capable scopes")
+        notes.append("unverified claims include write-capable scopes")
     elif role:
         notes.append(f"role claim: {role}")
     if iss := claims.get("iss"):
@@ -78,11 +77,11 @@ def _jwt_authority(claims: dict[str, Any]) -> tuple[Authority, list[str]]:
     exp = claims.get("exp")
     if isinstance(exp, (int, float)):
         if exp < time.time():
-            notes.append("token is expired — replay risk is low unless the signing key also leaked")
+            notes.append("unverified exp claim is in the past; issuer enforcement and revocation are unknown")
         elif exp - time.time() > 365 * 86400:
-            notes.append("expiry is more than a year out — effectively a standing credential")
+            notes.append("unverified expiry is more than a year out — potentially long-lived credential")
     else:
-        notes.append("no exp claim — token never expires")
+        notes.append("no exp claim — actual expiry is unknown")
     return auth, notes
 
 
@@ -102,7 +101,6 @@ def assess(finding: Finding) -> BlastRadius:
     rule = RULES_BY_ID.get(finding.rule_id)
     rationale: list[str] = []
     spend = False
-    expired = False
 
     if rule:
         authority, scope, spend = rule.authority, rule.scope, rule.spend
@@ -125,13 +123,12 @@ def assess(finding: Finding) -> BlastRadius:
             jwt_auth, notes = _jwt_authority(claims)
             authority = jwt_auth if finding.rule_id == "DB-JWT-001" else max(authority, jwt_auth)
             rationale.extend(notes)
-            expired = any("expired" in n for n in notes)
     if raw and raw.startswith(("sk_test_", "rk_test_")):
         authority = Authority.READ
         rationale.append("test-mode key — no live funds or data")
 
     score = int(authority) * 18
-    rationale.insert(0, f"authority={authority.label}: {scope}")
+    rationale.insert(0, f"estimated potential authority={authority.label}: {scope}; effective access unknown")
     if spend:
         score += 10
         rationale.append("billable — an attacker can run up charges until the key is revoked")
@@ -143,8 +140,6 @@ def assess(finding: Finding) -> BlastRadius:
             score += w
             if w:
                 rationale.append(why)
-    if expired:
-        score = max(0, score - 30)
     score = min(score, 100)
     return BlastRadius(authority=authority, scope=scope, exposure=exposure, score=score, rationale=rationale)
 
@@ -153,6 +148,6 @@ def enrich(findings: list[Finding]) -> list[Finding]:
     for f in findings:
         f.blast = assess(f)
         scored = _severity_for(f.blast.score)
-        downgraded = any(("expired" in r or "test-mode" in r) for r in f.blast.rationale)
+        downgraded = any(("test-mode" in r) for r in f.blast.rationale)
         f.severity = scored if downgraded else max(f.severity, scored)
     return findings

@@ -9,6 +9,8 @@ generated changes its hash, so a tampered proposal cannot be approved.
 from __future__ import annotations
 
 import getpass
+import fcntl
+import os
 import hashlib
 import json
 from datetime import datetime, timezone
@@ -85,17 +87,26 @@ def _read_ledger(path: Path) -> list[dict[str, Any]]:
     return [json.loads(ln) for ln in path.read_text().splitlines() if ln.strip()]
 
 
-def verify_ledger(path: Path) -> tuple[bool, str]:
-    prev = GENESIS
-    for i, entry in enumerate(_read_ledger(path), 1):
-        claimed = entry.get("entry_hash")
-        body = {k: v for k, v in entry.items() if k != "entry_hash"}
-        if body.get("prev_hash") != prev:
-            return False, f"entry {i}: chain broken (prev_hash mismatch)"
-        if sha256(canonical(body)) != claimed:
-            return False, f"entry {i}: content modified after it was written"
-        prev = claimed
-    return True, f"ledger intact ({len(_read_ledger(path))} entries)"
+def verify_ledger(path: Path, expected_head: str | None = None) -> tuple[bool, str]:
+    try:
+        entries = _read_ledger(path)
+        prev = GENESIS
+        for i, entry in enumerate(entries, 1):
+            if not isinstance(entry, dict):
+                return False, f"entry {i}: invalid record"
+            claimed = entry.get("entry_hash")
+            body = {k: v for k, v in entry.items() if k != "entry_hash"}
+            if body.get("prev_hash") != prev:
+                return False, f"entry {i}: chain broken (prev_hash mismatch)"
+            if sha256(canonical(body)) != claimed:
+                return False, f"entry {i}: content modified after it was written"
+            prev = claimed
+        if expected_head is not None and prev != expected_head:
+            return False, "ledger does not match the independently trusted head"
+        assurance = "trusted head matched" if expected_head is not None else "local integrity only; no trusted head supplied"
+        return True, f"ledger intact ({len(entries)} entries); {assurance}; head={prev}"
+    except (OSError, ValueError) as exc:
+        return False, f"ledger unreadable or malformed ({type(exc).__name__})"
 
 
 def record_decision(proposals_file: Path, ledger: Path, proposal_id: str, decision: str,
@@ -103,28 +114,36 @@ def record_decision(proposals_file: Path, ledger: Path, proposal_id: str, decisi
     if decision not in ("approve", "reject"):
         raise ValueError("decision must be approve or reject")
     proposals = json.loads(proposals_file.read_text())
-    proposals = proposals.get("proposals", proposals)
+    if isinstance(proposals, dict):
+        proposals = proposals.get("proposals", [])
+    if not isinstance(proposals, list):
+        raise ValueError("Expected a proposal list")
     matches = [p for p in proposals if p["proposal_id"].startswith(proposal_id)]
     if len(matches) != 1:
         raise LookupError(f"{len(matches)} proposals match {proposal_id!r} — use a longer prefix")
     p = matches[0]
     if not verify_proposal(p):
         raise PermissionError("proposal content does not match its hash — it was edited after generation; refusing")
-    ok, why = verify_ledger(ledger)
-    if not ok:
-        raise PermissionError(f"ledger failed verification: {why}")
-    entries = _read_ledger(ledger)
-    body = {
-        "proposal_id": p["proposal_id"],
-        "finding_id": p["finding_id"],
-        "decision": decision,
-        "approver": approver or getpass.getuser(),
-        "reason": reason,
-        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "prev_hash": entries[-1]["entry_hash"] if entries else GENESIS,
-    }
-    entry = {**body, "entry_hash": sha256(canonical(body))}
     ledger.parent.mkdir(parents=True, exist_ok=True)
-    with ledger.open("a") as fh:
-        fh.write(json.dumps(entry, sort_keys=True) + "\n")
-    return entry
+    # Serialize read/verify/append so simultaneous approvals share one chain.
+    with ledger.with_name(ledger.name + ".lock").open("a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        ok, why = verify_ledger(ledger)
+        if not ok:
+            raise PermissionError(f"ledger failed verification: {why}")
+        entries = _read_ledger(ledger)
+        body = {
+            "proposal_id": p["proposal_id"],
+            "finding_id": p["finding_id"],
+            "decision": decision,
+            "approver": approver or getpass.getuser(),
+            "reason": reason,
+            "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "prev_hash": entries[-1]["entry_hash"] if entries else GENESIS,
+        }
+        entry = {**body, "entry_hash": sha256(canonical(body))}
+        with ledger.open("a") as fh:
+            fh.write(json.dumps(entry, sort_keys=True) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        return entry

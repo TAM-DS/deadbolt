@@ -20,9 +20,16 @@ runs:
   using: composite
   steps:
     - shell: bash
-      run: pip install --quiet "${{ github.action_path }}"
+      env:
+        DEADBOLT_ACTION_PATH: ${{ github.action_path }}
+      run: pip install --quiet "$DEADBOLT_ACTION_PATH"
     - shell: bash
+      env:
+        DEADBOLT_SCAN_PATH: ${{ inputs.path }}
+        DEADBOLT_FAIL_ON: ${{ inputs.fail-on }}
+        DEADBOLT_SARIF: ${{ inputs.sarif }}
+        DEADBOLT_HISTORY: ${{ inputs.history }}
       run: |
-        args=(audit "${{ inputs.path }}" --fail-on "${{ inputs.fail-on }}" --format sarif --output "${{ inputs.sarif }}")
-        if [ "${{ inputs.history }}" = "true" ]; then args+=(--history); fi
+        args=(audit "$DEADBOLT_SCAN_PATH" --fail-on "$DEADBOLT_FAIL_ON" --format sarif --output "$DEADBOLT_SARIF")
+        if [ "$DEADBOLT_HISTORY" = "true" ]; then args+=(--history); fi
         deadbolt "${args[@]}"

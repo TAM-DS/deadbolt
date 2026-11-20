@@ -37,11 +37,15 @@ class Blob:
     text: str
 
 
+def parse_ignore(text: str) -> list[str]:
+    return [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+
+
 def load_ignore(root: Path) -> list[str]:
     f = root / ".deadboltignore"
     if not f.is_file():
         return []
-    return [ln.strip() for ln in f.read_text("utf-8", "replace").splitlines() if ln.strip() and not ln.startswith("#")]
+    return parse_ignore(f.read_text("utf-8", "replace"))
 
 
 def ignored(rel: str, patterns: list[str]) -> bool:
@@ -65,7 +69,10 @@ def iter_files(root: Path, max_bytes: int = DEFAULT_MAX_BYTES, extra_ignore: lis
     if root.is_file():
         yield root
         return
-    for dirpath, dirnames, filenames in os.walk(root):
+    def walk_error(error: OSError) -> None:
+        raise RuntimeError("Incomplete scan: directory could not be read") from error
+
+    for dirpath, dirnames, filenames in os.walk(root, onerror=walk_error):
         dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
         for fn in sorted(filenames):
             p = Path(dirpath) / fn
@@ -79,10 +86,10 @@ def iter_files(root: Path, max_bytes: int = DEFAULT_MAX_BYTES, extra_ignore: lis
                 continue
             try:
                 size = p.stat().st_size
-            except OSError:
-                continue
+            except OSError as exc:
+                raise RuntimeError(f"Incomplete scan: cannot inspect {rel}") from exc
             if size > (MAX_NESTED_BYTES if is_archive else max_bytes):
-                continue
+                raise RuntimeError(f"Incomplete scan: file exceeds size limit: {rel}")
             yield p
 
 
@@ -91,9 +98,12 @@ def read_blob(path: Path, rel: str) -> Iterator[Blob]:
         yield from iter_archive(path, rel)
         return
     try:
-        data = path.read_bytes()
-    except OSError:
-        return
+        with path.open("rb") as source:
+            data = source.read(DEFAULT_MAX_BYTES + 1)
+        if len(data) > DEFAULT_MAX_BYTES:
+            raise RuntimeError(f"Incomplete scan: file exceeds size limit: {rel}")
+    except OSError as exc:
+        raise RuntimeError(f"Incomplete scan: cannot read {rel}") from exc
     text = decode(data)
     if text is not None:
         yield Blob(Location(path=rel), text)
@@ -107,7 +117,9 @@ def _walk_tar(tf: tarfile.TarFile, prefix: str, layer: str | None, origin: str, 
         name = member.name.lstrip("./")
         # OCI blobs and docker-save layer.tar entries are themselves tarballs
         looks_layer = name.endswith(("layer.tar", ".tar", ".tar.gz", ".tgz")) or name.startswith("blobs/sha256/")
-        if looks_layer and depth < 3 and member.size <= MAX_NESTED_BYTES:
+        if looks_layer and (depth >= 3 or member.size > MAX_NESTED_BYTES):
+            raise RuntimeError(f"Incomplete scan: archive depth or size limit: {prefix}")
+        if looks_layer:
             fh = tf.extractfile(member)
             if fh is None:
                 continue
@@ -121,12 +133,18 @@ def _walk_tar(tf: tarfile.TarFile, prefix: str, layer: str | None, origin: str, 
                 with inner:
                     yield from _walk_tar(inner, prefix, layer_id[:64], "docker-layer", depth + 1)
                 continue
-            text = decode(data[:DEFAULT_MAX_BYTES])
-            if text is not None and not name.startswith("blobs/"):
+            if len(data) > DEFAULT_MAX_BYTES:
+                raise RuntimeError(f"Incomplete scan: archive blob exceeds size limit: {prefix}")
+            text = decode(data)
+            if name.startswith("blobs/") and text is not None:
                 yield Blob(Location(path=f"{prefix}!/{name}", origin=origin, layer=layer), text)
+            else:
+                raise RuntimeError(f"Incomplete scan: unreadable nested archive in {prefix}")
             continue
-        if _skip_name(name) or member.size > DEFAULT_MAX_BYTES:
+        if _skip_name(name):
             continue
+        if member.size > DEFAULT_MAX_BYTES:
+            raise RuntimeError(f"Incomplete scan: archive member exceeds size limit: {prefix}")
         fh = tf.extractfile(member)
         if fh is None:
             continue
@@ -137,11 +155,12 @@ def _walk_tar(tf: tarfile.TarFile, prefix: str, layer: str | None, origin: str, 
 
 def iter_archive(path: Path, rel: str) -> Iterator[Blob]:
     try:
-        tf = tarfile.open(path, mode="r:*")
-    except (tarfile.TarError, OSError, EOFError):
-        return
-    with tf:
-        yield from _walk_tar(tf, rel, None, "archive", 0)
+        if path.stat().st_size > MAX_NESTED_BYTES:
+            raise RuntimeError(f"Incomplete scan: archive exceeds size limit: {rel}")
+        with tarfile.open(path, mode="r:*") as tf:
+            yield from _walk_tar(tf, rel, None, "archive", 0)
+    except (tarfile.TarError, OSError, EOFError) as exc:
+        raise RuntimeError(f"Incomplete scan: cannot read archive {rel}") from exc
 
 
 # --------------------------------------------------------------------- git
@@ -154,14 +173,32 @@ def _git(root: Path, *args: str) -> str:
     return res.stdout
 
 
-def iter_staged(root: Path) -> Iterator[Blob]:
+def iter_staged(root: Path, extra_ignore: list[str] | None = None) -> Iterator[Blob]:
+    root = Path(_git(root, "rev-parse", "--show-toplevel").strip())
     names = _git(root, "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z").split("\0")
-    patterns = load_ignore(root)
+    patterns = list(extra_ignore or [])
+    # The policy for a staged scan comes from the same index snapshot.
+    if _git(root, "ls-files", "--cached", "--", ".deadboltignore").strip():
+        patterns += parse_ignore(_git(root, "show", ":.deadboltignore"))
+    if _git(root, "ls-files", "--unmerged").strip():
+        raise RuntimeError("Incomplete scan: resolve unmerged index entries first")
     for name in filter(None, names):
         if _skip_name(name) or ignored(name, patterns):
             continue
+        is_archive = name.lower().endswith(ARCHIVE_EXT)
+        size = int(_git(root, "cat-file", "-s", f":{name}").strip())
+        if size > (MAX_NESTED_BYTES if is_archive else DEFAULT_MAX_BYTES):
+            raise RuntimeError(f"Incomplete scan: staged file exceeds size limit: {name}")
         res = subprocess.run(["git", "-C", str(root), "show", f":{name}"], capture_output=True, check=False)
-        if res.returncode == 0 and (text := decode(res.stdout[:DEFAULT_MAX_BYTES])) is not None:
+        if res.returncode:
+            raise RuntimeError(f"Incomplete scan: cannot read staged file {name}")
+        if is_archive:
+            try:
+                with tarfile.open(fileobj=io.BytesIO(res.stdout), mode="r:*") as tf:
+                    yield from _walk_tar(tf, name, None, "staged", 0)
+            except (tarfile.TarError, OSError, EOFError) as exc:
+                raise RuntimeError(f"Incomplete scan: cannot read staged archive {name}") from exc
+        elif (text := decode(res.stdout)) is not None:
             yield Blob(Location(path=name, origin="staged"), text)
 
 
@@ -171,6 +208,9 @@ _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 def iter_history(root: Path, max_commits: int = 1000) -> Iterator[Blob]:
     """Yield only the *added* lines of each commit, grouped per file per commit,
     with real line numbers reconstructed from hunk headers."""
+    total = int(_git(root, "rev-list", "--count", "--all").strip())
+    if max_commits < 1 or total > max_commits:
+        raise RuntimeError(f"Incomplete history scan: {total} commits exceed --max-commits={max_commits}")
     out = _git(root, "log", "--all", "-p", "-U0", "--no-color", "--no-ext-diff",
                f"--max-count={max_commits}", "--format=__DEADBOLT_COMMIT__ %H")
     patterns = load_ignore(root)
@@ -181,7 +221,15 @@ def iter_history(root: Path, max_commits: int = 1000) -> Iterator[Blob]:
 
     def flush() -> Iterator[Blob]:
         if commit and path and lines and not _skip_name(path) and not ignored(path, patterns):
-            yield Blob(Location(path=path, line=first_line, origin="git-history", commit=commit), "\n".join(lines))
+            if path.lower().endswith((".json", ".toml")):
+                # Config parsers need a complete document when a commit changes one field.
+                size = int(_git(root, "cat-file", "-s", f"{commit}:{path}").strip())
+                if size > DEFAULT_MAX_BYTES:
+                    raise RuntimeError(f"Incomplete scan: historical config exceeds size limit: {path}")
+                text = _git(root, "show", f"{commit}:{path}")
+                yield Blob(Location(path=path, origin="git-history", commit=commit), text)
+            else:
+                yield Blob(Location(path=path, line=first_line, origin="git-history", commit=commit), "\n".join(lines))
 
     for raw in out.splitlines():
         if raw.startswith("__DEADBOLT_COMMIT__ "):

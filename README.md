@@ -1,10 +1,10 @@
 # DeadBolt
 
-## Classic scanners find keys; DeadBolt finds authority.
+## Find leaked keys. Review agent authority.
 
 **An offline scanner for leaked secrets and over-privileged AI agents.**
 
-DeadBolt finds leaked credentials and risky MCP and agent configurations in source trees, git history and container images. For each one it works out what the credential could actually be used for. It then writes a hashed revocation proposal that a human approves. It makes **no network calls**, needs **no dependencies** beyond the Python standard library, and **never changes anything** on its own.
+DeadBolt finds leaked credentials and risky MCP and agent configurations in source trees, git history and container images. It estimates potential authority from credential types, configuration and unverified token claims, then writes a remediation proposal for human review. **Effective access remains unknown.** Core scanning makes **no network calls**. Python 3.11+ uses the standard library; Python 3.10 installs `tomli` for TOML parsing. An optional local model adds explanations over loopback HTTP. Remediation is performed by the operator.
 
 ```bash
 pip install git+https://github.com/TAM-DS/deadbolt
@@ -20,17 +20,17 @@ deadbolt demo          # builds a synthetic "dirty repo" and audits it, with not
 
 A leaked API key is rarely the whole problem. The real damage is what the key is **allowed to do**. That can mean a cloud bill in the thousands of dollars by morning, or a firmware-signing key that makes every release suspect.
 
-AI agents add new places where credentials and authority leak. Classic scanners never look in most of them:
+AI agents add new places where credentials and authority leak. DeadBolt checks these surfaces and adds configuration-specific findings:
 
-| Surface | What goes wrong | Classic scanners |
+| Surface | What goes wrong | DeadBolt coverage |
 |---|---|---|
-| MCP server configs (`mcp.json`, `claude_desktop_config.json`, Cursor, VS Code, Cline, Codex TOML) | standing tokens in `env`, auto-approved shell tools, `/` filesystem roots, unpinned `npx` servers, `docker.sock` mounts | ✗ |
-| Agent / tool manifests | `scopes: ["*"]`, org-wide OAuth scopes such as `cloud-platform` | ✗ |
-| Agent context caches & memory | the model echoes a key into an unencrypted conversation-history file | ✗ |
-| Prompt files | a key embedded in a prompt is sent to the model provider on **every call** | ✗ |
-| Git history | the "I deleted the file" fix: the key is still in every clone | some |
-| Container image layers | a token baked into `layer.tar` of a `docker save` / OCI tarball | some |
-| CI logs | `npm publish` echoes `NPM_TOKEN` | some |
+| MCP server configs (`mcp.json`, `claude_desktop_config.json`, Cursor, VS Code, Cline, Codex TOML) | standing tokens in `env`, auto-approved shell tools, `/` filesystem roots, unpinned `npx` servers, `docker.sock` mounts | checked |
+| Agent / tool manifests | `scopes: ["*"]`, org-wide OAuth scopes such as `cloud-platform` | checked |
+| Agent context caches & memory | the model echoes a key into an unencrypted conversation-history file | checked |
+| Prompt files | a key embedded in a prompt is sent to the model provider on **every call** | checked |
+| Git history | the "I deleted the file" fix: the key is still in every clone | checked |
+| Container image layers | a token baked into `layer.tar` of a `docker save` / OCI tarball | checked |
+| CI logs | `npm publish` echoes `NPM_TOKEN` | checked |
 
 DeadBolt treats each finding as an **authority** problem, not just a pattern match.
 
@@ -82,16 +82,16 @@ DeadBolt treats each finding as an **authority** problem, not just a pattern mat
 
 ### 3. Deterministic blast-radius triage
 
-Every rule declares what the credential can do (`read`, `write`, `deploy` or `admin`), whether it can **spend money**, and its revocation runbook. The score then adds up the places the secret has travelled:
+Every rule declares an estimated potential authority (`read`, `write`, `deploy` or `admin`), whether it can **spend money**, and its revocation runbook. The score then adds up the places the secret has travelled:
 
 ```
 blast = 18 × authority  + 10 if billable
       + git-history 8 · docker-layer 8 · ci-log 6 · agent-context-cache 6 · llm-prompt 6 · mcp-config 5 · IaC 4
 ```
 
-JWTs are decoded but not verified, because an attacker replaying a token cares about its claims, not its signature. A `service_role` token with a ten-year `exp` is scored as **admin**. An expired one is marked down. The same input always produces the same score.
+JWTs are decoded as **unverified claims**. A `service_role` claim contributes an estimated **admin** classification. Signature validity, actual grants, revocation and issuer enforcement remain unknown. An unverified expiry claim never reduces severity. Scores are review priorities, with time-dependent expiry notes, and are not probabilities of compromise or verified access.
 
-**Optional local LLM notes** (`--llm-triage`) use an Ollama-compatible endpoint. The client refuses any host that isn't loopback, bypasses proxies, and sends only redacted metadata. The model can add an explanation, but it can **never** change authority, score or severity.
+**Optional local LLM notes** (`--llm-triage`) use an Ollama-compatible endpoint. The client accepts numeric loopback addresses or `localhost`, pins the connection to a numeric loopback address, bypasses proxies, refuses redirects, and sends sanitized metadata. The model can add an explanation while authority, score and severity remain deterministic. The report counts attempted local requests. A connection failure, missing model or invalid response returns exit code 2 with the deterministic scan report preserved. Actual inference with a real local model remains unverified; HTTP integration is tested with a local synthetic server.
 
 ### 4. Bounded authority: proposals, not actions
 
@@ -101,9 +101,15 @@ deadbolt approve 431bc213 --by "Tracy Manning" --reason "rotated in Stripe dashb
 deadbolt ledger            # ✔ ledger intact (1 entries)
 ```
 
-- Each proposal is **content-addressed**: its `proposal_id` is the sha256 of its canonical body. If someone edits a step, the proposal can no longer be approved.
-- Decisions go into an **append-only, hash-chained** JSONL ledger, and `deadbolt ledger` detects any rewrite.
+- Each proposal is **content-addressed**. Its `proposal_id` is the SHA-256 of its canonical body. Editing a step without updating that ID invalidates the proposal. Review the complete content and compare the ID with your trusted copy. Hashes establish content identity; they do not authenticate an author.
+- Decisions are appended under a file lock to a **hash-chained** JSONL ledger. Ordinary edits break verification. To detect recomputed hashes or truncation, compare with an independently retained head using `deadbolt ledger --expected-head <trusted-sha256>`. A local chain alone cannot establish authenticity or completeness. Approver names are operator-supplied labels.
 - `executes_automatically: false` is hard-coded. DeadBolt never revokes keys, rewrites history or opens PRs.
+
+### Safe demo and ledger checks
+
+`deadbolt demo` creates a new temporary directory. `--out PATH` requires a destination that does not exist. To repeat a demo with a saved path, choose a new destination.
+
+An approval prints the complete ledger head. Save that hash independently if you need to check for later rewriting or truncation. `--expected-head` compares the entire current ledger to that checkpoint; after a legitimate append, retain the new head. For a tamper demonstration, edit a **copy** of the ledger and verify that copy with `--ledger PATH`.
 
 ## Demo output (synthetic, all credentials fake)
 
@@ -111,30 +117,30 @@ deadbolt ledger            # ✔ ledger intact (1 entries)
 
 ```text
 DeadBolt 0.1.0  ·  /tmp/dirty  ·  sources: worktree, git-history
-16 files · 0.01 MB · 10 ms · 0 network calls
+16 files · 0.01 MB · 10 ms · 0 attempted network calls
 
  CRITICAL  DB-STRIPE-001  Stripe live secret key
            config/settings.py:1 @ 283aab0096  worktree
            Stripe live secret key detected (sk_l********54qs)
-           blast radius  90/100 · authority=admin · exposure=git-history
+           blast radius  90/100 · estimated authority=admin · exposure=git-history
              – billable — an attacker can run up charges until the key is revoked
              – Committed to git history — deleting the file does not remove it; every clone has it
 
  CRITICAL  DB-MCP-007  Arbitrary command execution exposed to the model
            .cursor/mcp.json:21 @ 283aab0096  worktree
            [shell] server exposes shell/command execution — prompt injection becomes remote code execution
-           blast radius  85/100 · authority=admin · exposure=mcp-config,git-history
+           blast radius  85/100 · estimated authority=admin · exposure=mcp-config,git-history
 
  CRITICAL  DB-MCP-001  Standing credential in MCP server config
            .cursor/mcp.json:33 @ 283aab0096  worktree
            [fleet-telemetry] headers.Authorization holds a literal JSON Web Token — every agent session inherits it
-           blast radius  85/100 · authority=admin · exposure=mcp-config,git-history
-             – claims grant elevated role (service_role) — bypasses row-level / tenant controls
-             – expiry is more than a year out — effectively a standing credential
+           blast radius  85/100 · estimated authority=admin · exposure=mcp-config,git-history
+             – unverified claims suggest elevated role (service_role); effective access unknown
+             – unverified expiry is more than a year out — potentially long-lived credential
 
  HIGH      DB-DOCKER-001  Docker Hub personal access token
            artifacts/edge-gateway.image.tar!/app/config/registry.yaml:3 [layer a71e0c9d55b2]  docker-layer
-           blast radius  62/100 · authority=deploy · exposure=docker-layer
+           blast radius  62/100 · estimated authority=deploy · exposure=docker-layer
 
  HIGH      DB-GL-001  GitLab personal access token
            config/legacy-ci.yaml:3 @ …  git-history          ← file was deleted; key lives on in history
@@ -158,7 +164,9 @@ deadbolt rules                              # list every rule with its authority
 ```
 
 Exit codes: `0` nothing at or above `--fail-on` (default `high`) · `1` findings · `2` usage or runtime error.
-Skip paths with `.deadboltignore` (glob per line) or `--exclude`.
+Skip paths with `.deadboltignore` (glob per line) or `--exclude`. Staged scans use `.deadboltignore` from the Git index, so unstaged edits do not alter the staged scan policy. Ignore rules and baselines are reviewable policy inputs.
+
+Unreadable/corrupt archives, files exceeding the 2 MiB text limit, archives over 512 MiB, excessive archive nesting, malformed supported configs and history beyond `--max-commits` return **2 (incomplete scan)**. Increase the commit limit explicitly for longer histories. Known binary extensions, dependency/build directories and symlinks encountered during a tree walk are excluded by design. History scanning inspects added text plus complete changed JSON/TOML configs. Scope and exclusions still require review.
 
 **pre-commit**
 
@@ -183,11 +191,11 @@ repos:
 
 ## Engineering notes
 
-- **Zero dependencies, zero network.** A unit test fails the build if any core module imports `socket`, `urllib.request`, `http.client`, `requests`, `httpx` or `aiohttp`. The only network-capable module is the opt-in, loopback-only LLM client.
-- **Throughput.** Each rule's regex runs only when one of its keywords appears in the lowercased file. The generic rule finds its anchors with `str.find` and runs a short anchored regex at those offsets. Files are spread across a process pool. Benchmark: **10,000 Python files / 94 MB in 1.7 s on a 2-vCPU Linux sandbox** (about 56 MB/s), and that corpus is deliberately full of `token` / `key` keywords to defeat the prefilter.
-- **Redaction everywhere.** Findings carry `prefix****last4` and a truncated sha256 fingerprint. Raw values exist only inside the engine and are deleted before reporting. A test greps every output format for planted values.
+- **Offline core.** A unit test fails the build if any core module imports `socket`, `urllib.request`, `http.client`, `requests`, `httpx` or `aiohttp`. The only network-capable module is the opt-in, loopback-only LLM client.
+- **Throughput.** Each rule's regex runs only when one of its keywords appears in the lowercased file. The generic rule finds its anchors with `str.find` and runs a short anchored regex at those offsets. Files are spread across a process pool. The original pre-hardening benchmark reported **10,000 Python files / 94 MB in 1.7 s on a 2-vCPU Linux sandbox**. That timing has not been revalidated for this revision.
+- **Redaction.** Findings carry `prefix****last4` and a truncated SHA-256 fingerprint. Known detected values are removed from report metadata, URL query strings and userinfo are sanitized, and model notes are filtered. Regression cases cover endpoint URLs, server names and all report/proposal formats. Detection and redaction have finite rule coverage.
 - **Stable identities.** Finding IDs are derived from the rule and the secret's fingerprint, not the line number, so baselines survive refactors. A secret found in both the worktree and history is reported once, tagged `git-history`.
-- **Tested.** 36 stdlib `unittest` cases cover every rule and MCP check, false positives, redaction, SARIF shape, baselines, exit codes, staged mode, proposal tampering and ledger tampering. CI runs them on Python 3.10 through 3.13.
+- **Tested.** 60 `unittest` cases cover every rule and MCP check, false positives, redaction, SARIF shape, baselines, exit codes, staged mode, proposal tampering and ledger tampering. CI runs them on Python 3.10 through 3.13.
 
 ## Part of an end-to-end governed-agent lifecycle
 

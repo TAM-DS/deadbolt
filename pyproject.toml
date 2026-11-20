@@ -10,7 +10,7 @@ readme = "README.md"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Tracy Manning" }]
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["tomli>=2.0; python_version < '3.11'"]
 keywords = ["security", "secrets", "secret-scanning", "mcp", "agentic-ai", "sarif", "devsecops", "supply-chain"]
 classifiers = [
   "License :: OSI Approved :: Apache Software License",

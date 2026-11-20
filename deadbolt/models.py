@@ -93,6 +93,8 @@ class BlastRadius:
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["authority"] = self.authority.label
+        d["authority_basis"] = "heuristic from credential type, configuration and unverified claims"
+        d["effective_access"] = "unknown"
         return d
 
 

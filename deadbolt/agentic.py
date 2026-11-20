@@ -24,7 +24,10 @@ from .scanner import scan_text, shannon_entropy
 try:  # Python 3.11+
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover
-    tomllib = None  # type: ignore[assignment]
+    try:
+        import tomli as tomllib
+    except ModuleNotFoundError:
+        tomllib = None  # type: ignore[assignment]
 
 
 # --------------------------------------------------------------- exposure tags
@@ -92,17 +95,19 @@ def _servers_from_json(doc: Any) -> dict[str, dict[str, Any]]:
 def load_mcp_servers(path: str, text: str) -> dict[str, dict[str, Any]]:
     low = path.lower()
     if low.endswith(".json"):
-        if "mcpservers" not in text.lower() and "servers" not in text and "mcp_servers" not in text:
+        if not is_mcp_path(path) and "mcpservers" not in text.lower() and "servers" not in text and "mcp_servers" not in text:
             return {}
         try:
             return _servers_from_json(json.loads(text))
-        except (json.JSONDecodeError, ValueError):
-            return {}
-    if low.endswith(".toml") and tomllib and "mcp_servers" in text:
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise RuntimeError(f"Incomplete scan: invalid MCP JSON in {path}") from exc
+    if low.endswith(".toml") and "mcp_servers" in text:
+        if tomllib is None:
+            raise RuntimeError("TOML scanning on Python 3.10 requires tomli; reinstall DeadBolt")
         try:
             return _servers_from_json(tomllib.loads(text))
-        except (tomllib.TOMLDecodeError, ValueError):
-            return {}
+        except (tomllib.TOMLDecodeError, ValueError) as exc:
+            raise RuntimeError(f"Incomplete scan: invalid MCP TOML in {path}") from exc
     return {}
 
 
@@ -330,10 +335,41 @@ def _iter_agent_manifest(path: str, text: str) -> Iterator[tuple[int, str, str]]
     agentish = any(t in name for t in ("agent", "tool", "crew", "assistant", "mcp", "manifest", "skill", "plugin"))
     if not agentish or not name.endswith((".json", ".yaml", ".yml", ".toml")):
         return
+    if name.endswith((".json", ".toml")):
+        try:
+            if name.endswith(".json"):
+                doc = json.loads(text)
+            else:
+                if tomllib is None:
+                    raise RuntimeError("TOML scanning on Python 3.10 requires tomli; reinstall DeadBolt")
+                doc = tomllib.loads(text)
+        except ValueError as exc:
+            raise RuntimeError(f"Incomplete scan: invalid agent config in {path}") from exc
+        yield from _manifest_grants(doc, text)
+        return
     for m in _WILDCARD_SCOPE.finditer(text):
         yield text.count("\n", 0, m.start()) + 1, m.group(1), m.group(2)
     for m in _OAUTH_BROAD.finditer(text):
         yield text.count("\n", 0, m.start()) + 1, "oauth-scope", m.group(1)
+
+
+def _manifest_grants(doc: Any, text: str) -> Iterator[tuple[int, str, str]]:
+    """Read nested JSON/TOML grants independently of whitespace and list order."""
+    if isinstance(doc, list):
+        for item in doc:
+            yield from _manifest_grants(item, text)
+    elif isinstance(doc, dict):
+        for key, value in doc.items():
+            if re.fullmatch(r"scopes?|permissions?|allowed[_-]?tools|capabilities|roles?", key, re.I):
+                values = value if isinstance(value, list) else [value]
+                for grant in values:
+                    if not isinstance(grant, str):
+                        continue
+                    if re.fullmatch(r"\*|admin|all|root|full[_-]?access|owner", grant, re.I):
+                        yield _line_of(text, grant), key, grant.lower()
+                    elif _OAUTH_BROAD.fullmatch(json.dumps(grant)):
+                        yield _line_of(text, grant), "oauth-scope", grant
+            yield from _manifest_grants(value, text)
 
 
 def audit_agent_manifest(path: str, text: str, base: Location) -> list[Finding]:

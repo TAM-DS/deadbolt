@@ -15,6 +15,7 @@ from . import __version__, proposals, report
 from .engine import ScanOptions, run
 from .models import Severity
 from .rules import ALL_RULES
+from .redaction import sanitize_text
 
 
 def _sev(v: str) -> Severity:
@@ -41,14 +42,15 @@ def _add_scan_args(p: argparse.ArgumentParser) -> None:
 
 
 def _emit(result, args) -> int:
+    triage_failed = False
     if args.llm_triage:
         from .triage_llm import annotate
         try:
-            n = annotate(result.findings, model=args.llm_model, host=args.llm_host)
+            n = annotate(result.findings, model=args.llm_model, host=args.llm_host, stats=result)
             print(f"deadbolt: local LLM annotated {n} findings", file=sys.stderr)
-        except PermissionError as e:
-            print(f"deadbolt: {e}", file=sys.stderr)
-            return 2
+        except (PermissionError, RuntimeError) as e:
+            print(f"deadbolt: {sanitize_text(str(e))}; deterministic scan results follow", file=sys.stderr)
+            triage_failed = True
 
     if args.proposals:
         props = proposals.build_all(result.findings)
@@ -69,6 +71,8 @@ def _emit(result, args) -> int:
         if args.output:
             out.close()
             print(f"deadbolt: report written to {args.output}", file=sys.stderr)
+    if triage_failed:
+        return 2
     return 1 if any(f.severity >= args.fail_on for f in result.findings) else 0
 
 
@@ -111,16 +115,16 @@ def cmd_decide(args, decision: str) -> int:
         entry = proposals.record_decision(args.proposals, args.ledger, args.proposal_id, decision,
                                           approver=args.by, reason=args.reason)
     except (LookupError, PermissionError, ValueError, FileNotFoundError) as e:
-        print(f"deadbolt: {e}", file=sys.stderr)
+        print(f"deadbolt: {sanitize_text(str(e))}", file=sys.stderr)
         return 2
     print(f"{decision}d {entry['proposal_id'][:16]} by {entry['approver']} → {args.ledger} "
-          f"(entry {entry['entry_hash'][:16]})")
+          f"(entry {entry['entry_hash']})")
     print("DeadBolt has not executed anything. Carry out the runbook steps, then baseline the finding.")
     return 0
 
 
 def cmd_ledger(args) -> int:
-    ok, msg = proposals.verify_ledger(args.ledger)
+    ok, msg = proposals.verify_ledger(args.ledger, expected_head=args.expected_head)
     print(("✔ " if ok else "✘ ") + msg)
     return 0 if ok else 1
 
@@ -175,6 +179,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     lg = sub.add_parser("ledger", help="verify the approval ledger hash chain")
     lg.add_argument("--ledger", type=Path, default=Path(".deadbolt/approvals.jsonl"))
+    lg.add_argument("--expected-head", help="trusted SHA-256 head stored separately from the ledger")
     lg.set_defaults(func=cmd_ledger)
 
     r = sub.add_parser("rules", help="list detection rules")
@@ -186,12 +191,12 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
-    except RuntimeError as e:
-        print(f"deadbolt: {e}", file=sys.stderr)
-        return 2
     except KeyboardInterrupt:
         return 130
     except BrokenPipeError:  # e.g. `deadbolt rules | head`
         import os
         os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
         return 0
+    except (RuntimeError, OSError, ValueError) as e:
+        print(f"deadbolt: {sanitize_text(str(e))}", file=sys.stderr)
+        return 2
