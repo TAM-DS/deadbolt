@@ -6,6 +6,12 @@
 
 DeadBolt finds leaked credentials and risky MCP and agent configurations in source trees, git history and container images. It estimates potential authority from credential types, configuration and unverified token claims, then writes a remediation proposal for human review. **Effective access remains unknown.** Core scanning makes **no network calls**. Python 3.11+ uses the standard library; Python 3.10 installs `tomli` for TOML parsing. An optional local model adds explanations over loopback HTTP. Remediation is performed by the operator.
 
+## See it in action
+
+![DeadBolt 0.1.0 running in Mac Terminal, showing critical findings, redacted credentials, estimated authority and zero attempted network calls](docs/images/deadbolt-demo-macos.png)
+
+*Synthetic demo—all credentials are fake. Screenshot from a Mac Terminal run; timings vary by machine.*
+
 ## Use as a GitHub Action
 ### Add these steps to your workflow’s `steps` section.
 
