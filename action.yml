@@ -1,0 +1,28 @@
+name: DeadBolt secret & agent-authority scan
+description: Offline scan for leaked credentials, risky MCP/agent configs, git history and container layers. Emits SARIF.
+branding:
+  icon: lock
+  color: red
+inputs:
+  path:
+    description: Path to scan
+    default: "."
+  history:
+    description: Also scan git history (requires fetch-depth 0)
+    default: "true"
+  fail-on:
+    description: Minimum severity that fails the job (info|low|medium|high|critical)
+    default: high
+  sarif:
+    description: SARIF output path
+    default: deadbolt.sarif
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: pip install --quiet "${{ github.action_path }}"
+    - shell: bash
+      run: |
+        args=(audit "${{ inputs.path }}" --fail-on "${{ inputs.fail-on }}" --format sarif --output "${{ inputs.sarif }}")
+        if [ "${{ inputs.history }}" = "true" ]; then args+=(--history); fi
+        deadbolt "${args[@]}"

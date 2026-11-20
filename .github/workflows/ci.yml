@@ -1,0 +1,56 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Unit tests (stdlib only, no network)
+        run: python -m unittest discover -s tests -v
+      - name: Install CLI
+        run: pip install .
+      - name: Zero-setup demo must find the planted secrets
+        run: |
+          set +e
+          deadbolt demo --format json --output demo.json
+          code=$?
+          set -e
+          test "$code" -eq 1   # findings at/above HIGH → exit 1 is the expected result
+          python -c "import json; r=json.load(open('demo.json')); n=len(r['findings']); print(n,'findings'); assert n >= 25"
+
+  self-scan:
+    # DeadBolt scans its own repository — including full git history — and must be clean.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install .
+      - name: Scan worktree + history
+        run: deadbolt audit . --history --fail-on low --format sarif --output deadbolt.sarif
+      - name: Upload to GitHub code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: deadbolt.sarif
+          category: deadbolt

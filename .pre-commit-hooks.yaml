@@ -1,0 +1,8 @@
+- id: deadbolt
+  name: DeadBolt (secrets & agent authority)
+  description: Block commits that stage credentials or risky MCP/agent configs. Runs offline.
+  entry: deadbolt audit --staged --fail-on medium
+  language: python
+  pass_filenames: false
+  always_run: true
+  stages: [pre-commit]
