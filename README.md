@@ -1,5 +1,7 @@
 # DeadBolt
 
+## Classic scanners find keys; DeadBolt finds authority.
+
 **An offline scanner for leaked secrets and over-privileged AI agents.**
 
 DeadBolt finds leaked credentials and risky MCP and agent configurations in source trees, git history and container images. For each one it works out what the credential could actually be used for. It then writes a hashed revocation proposal that a human approves. It makes **no network calls**, needs **no dependencies** beyond the Python standard library, and **never changes anything** on its own.
