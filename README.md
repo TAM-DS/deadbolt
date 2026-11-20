@@ -6,13 +6,38 @@
 
 DeadBolt finds leaked credentials and risky MCP and agent configurations in source trees, git history and container images. It estimates potential authority from credential types, configuration and unverified token claims, then writes a remediation proposal for human review. **Effective access remains unknown.** Core scanning makes **no network calls**. Python 3.11+ uses the standard library; Python 3.10 installs `tomli` for TOML parsing. An optional local model adds explanations over loopback HTTP. Remediation is performed by the operator.
 
+## Quick start — macOS and Linux
+
+Run these commands in **Mac Terminal** or a Linux terminal using bash or zsh. You need **Python 3.10–3.13**, Git and Python's `venv` support installed. Installation requires internet access; the core scanner and demo run offline afterward. **No local AI model, API key or Docker daemon is required.**
+
 ```bash
-pip install git+https://github.com/TAM-DS/deadbolt
-deadbolt demo          # builds a synthetic "dirty repo" and audits it, with nothing else to set up
+python3 --version
+git --version
+python3 -m venv ~/deadbolt-venv
+source ~/deadbolt-venv/bin/activate
+python -m pip install git+https://github.com/TAM-DS/deadbolt
+deadbolt demo
 ```
 
+The demo creates a temporary synthetic repository with fake credentials. Expect **30 findings and exit code 1**: the scanner found the planted problems. Exit code 2 indicates a usage or runtime error.
+
+In a new terminal session, activate the same environment before running DeadBolt:
+
+```bash
+source ~/deadbolt-venv/bin/activate
+deadbolt demo
+```
+
+To update an existing installation, run this inside the activated environment:
+
+```bash
+python -m pip install --upgrade --force-reinstall git+https://github.com/TAM-DS/deadbolt
+```
+
+Run `deactivate` when you are finished.
+
 [![ci](https://github.com/TAM-DS/deadbolt/actions/workflows/ci.yml/badge.svg)](https://github.com/TAM-DS/deadbolt/actions/workflows/ci.yml)
-· Apache-2.0 · Python 3.10–3.13 · Linux-first (Rocky / RHEL / Ubuntu)
+· Apache-2.0 · Python 3.10–3.13 · Linux-first · macOS CLI · CI tested on Linux
 
 ---
 
