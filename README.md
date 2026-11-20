@@ -252,4 +252,4 @@ They share one principle, the same one Agent Foundry states as *capability is no
 
 ## License
 
-Apache-2.0 © Tracy Manning. Built for defenders: DeadBolt never validates a credential against a live service and never uses a credential it finds.
+Apache-2.0 © Tracy Anne Griffin Manning. Built for defenders: DeadBolt never validates a credential against a live service and never uses a credential it finds.
